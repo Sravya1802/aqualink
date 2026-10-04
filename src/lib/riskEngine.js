@@ -51,16 +51,23 @@ export const PATHWAYS = {
 const EQS_UG = { 'lead-dissolved': 14, 'cadmium-dissolved': 1.5, 'mercury-dissolved': 0.07, 'nickel-dissolved': 34, 'arsenic-dissolved': 10 }
 
 const levelOf = (score) => (score >= 55 ? 'high' : score >= 25 ? 'moderate' : 'low')
+const isElevated = (p) => p.level === 'high' || p.level === 'moderate'
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 
-// Latest corrected value + series per lab code.
-export function labSummary(site) {
+// Latest corrected value + series per lab code. Values that are still physically
+// implausible after correction are quarantined: reported, but never scored.
+export function labSummary(site, quarantine = []) {
   const out = {}
   for (const obs of labObservations(site)) {
     const a = assessObservation(obs)
     if (!a || a.value == null) continue
     const code = codeOf(obs) === '703421000' ? 'waterTemperature' : codeOf(obs)
     const year = yearOf(obs)
+    const implausible = a.issues.find((i) => i.rule === 'implausible-range')
+    if (implausible) {
+      quarantine.push({ code, date: year, ref: `Observation/${obs.id}`, reason: implausible.message })
+      continue
+    }
     const entry = (out[code] ||= { code, display: obs.code?.text || obs.code?.coding?.[0]?.display, unit: a.unit, series: [] })
     entry.series.push({ date: year, value: a.value, censored: a.censored, detectionLimit: a.detectionLimit, issues: a.issues, ref: `Observation/${obs.id}` })
   }
@@ -71,14 +78,25 @@ export function labSummary(site) {
   return out
 }
 
-// Share of recent citizen reports that gave each answer.
+// Share of independent citizens (latest report per citizen, last 30 days of activity)
+// that gave each answer. Repeat submissions by one person count once, so nobody can
+// inflate a score or its confidence on their own.
 function citizenSummary(siteId) {
-  const reports = reportsFor(siteId)
-  if (!reports.length) return { n: 0, share: () => 0, reports }
+  const reports = reportsFor(siteId) // newest first
+  if (!reports.length) return { n: 0, submissions: 0, share: () => 0, reports }
   const newest = new Date(reports[0].createdAt).getTime()
   const recent = reports.filter((r) => newest - new Date(r.createdAt).getTime() <= 30 * 864e5)
-  const share = (qid, code) => recent.filter((r) => [].concat(r.answers[qid] ?? []).includes(code)).length / recent.length
-  return { n: recent.length, share, reports: recent }
+  const latestPerCitizen = new Map()
+  for (const r of recent) if (!latestPerCitizen.has(r.citizenId)) latestPerCitizen.set(r.citizenId, r)
+  const used = [...latestPerCitizen.values()]
+  const share = (qid, code) => used.filter((r) => [].concat(r.answers[qid] ?? []).includes(code)).length / used.length
+  return { n: used.length, submissions: recent.length, share, reports: used }
+}
+
+// Older lab results count for less: a 2020 sample says little about the stream today.
+function ageFactor(date) {
+  const age = new Date().getFullYear() - Number(String(date).slice(0, 4))
+  return age <= 2 ? 1 : age <= 5 ? 0.7 : 0.4
 }
 
 function healthContext(site) {
@@ -97,7 +115,8 @@ function healthContext(site) {
 }
 
 export function assessSite(site) {
-  const labs = labSummary(site)
+  const quarantine = []
+  const labs = labSummary(site, quarantine)
   const cit = citizenSummary(site.id)
   const health = healthContext(site)
   const ev = Object.fromEntries(Object.keys(PATHWAYS).map((k) => [k, []]))
@@ -108,7 +127,7 @@ export function assessSite(site) {
     ev[pathway].push({ weight, text, source })
     refs.forEach((r) => basis.add(r))
   }
-  const pct = (s) => `${Math.round(s * cit.n)} of ${cit.n} recent report${cit.n > 1 ? 's' : ''}`
+  const pct = (s) => `${Math.round(s * cit.n)} of ${cit.n} citizen${cit.n > 1 ? 's' : ''}`
   const citRefs = cit.reports.flatMap((r) => r.resourceRefs || [])
 
   // ---- Citizen evidence (weighted by share of agreeing reports) ----
@@ -152,34 +171,52 @@ export function assessSite(site) {
     gaps.push('No citizen reports yet for this site — launch a "first report" challenge.')
   }
 
-  // ---- Lab / sensor evidence (data-quality corrected) ----
+  // ---- Lab / sensor evidence (data-quality corrected, age-weighted) ----
   const L = (code) => labs[code]?.latest
-  const ref = (code) => [labs[code].latest.ref]
-  if (L('nitrate')?.value > 50) add('waterborne', 0.25, `nitrate ${L('nitrate').value} mg/L > 50 mg/L (EU Nitrates Directive)`, 'lab', ref('nitrate'))
-  else if (L('nitrate')?.value > 25) add('algae', 0.1, `nitrate ${L('nitrate').value} mg/L (elevated nutrients)`, 'lab', ref('nitrate'))
-  if (L('ammonium')?.value > 0.5) add('waterborne', 0.3, `ammonium ${L('ammonium').value} mg/L > 0.5 mg/L (sewage marker)`, 'lab', ref('ammonium'))
-  if (L('total-phosphates')?.value > 0.1) add('algae', 0.3, `total phosphates ${L('total-phosphates').value} mg/L > 0.1 mg/L`, 'lab', ref('total-phosphates'))
+  const lab = (pathway, weight, text, code) => {
+    const p = labs[code].latest
+    const f = ageFactor(p.date)
+    add(pathway, weight * f, `${text} · ${p.date.slice(0, 4)}${f < 1 ? ` (older data, weight ×${f})` : ''}`, 'lab', [p.ref])
+  }
+  // Which pathways the available lab/sensor indicators can detect at all.
+  const labCovers = { waterborne: false, algae: false, vector: false, tick: false, chemical: false, wellbeing: false }
+  if (L('nitrate') || L('ammonium') || L('dissolved-oxygen')) labCovers.waterborne = true
+  if (L('total-phosphates') || L('nitrate') || L('waterTemperature')) labCovers.algae = true
+  if (L('waterTemperature')) labCovers.vector = true
+
+  if (L('nitrate')?.value > 50) lab('waterborne', 0.25, `nitrate ${L('nitrate').value} mg/L > 50 mg/L (EU Nitrates Directive)`, 'nitrate')
+  else if (L('nitrate')?.value > 25) lab('algae', 0.1, `nitrate ${L('nitrate').value} mg/L (elevated nutrients)`, 'nitrate')
+  if (L('ammonium')?.value > 0.5) lab('waterborne', 0.3, `ammonium ${L('ammonium').value} mg/L > 0.5 mg/L (sewage marker)`, 'ammonium')
+  if (L('total-phosphates')?.value > 0.1) lab('algae', 0.3, `total phosphates ${L('total-phosphates').value} mg/L > 0.1 mg/L`, 'total-phosphates')
   const doS = labs['dissolved-oxygen']
   if (doS) {
     const last = doS.latest.value
-    if (last < 5) add('waterborne', 0.3, `dissolved oxygen ${last} mg/L < 5 mg/L (organic pollution)`, 'lab', ref('dissolved-oxygen'))
-    else if (last < 6) add('waterborne', 0.15, `dissolved oxygen ${last} mg/L is low (< 6 mg/L)`, 'lab', ref('dissolved-oxygen'))
+    if (last < 5) lab('waterborne', 0.3, `dissolved oxygen ${last} mg/L < 5 mg/L (organic pollution)`, 'dissolved-oxygen')
+    else if (last < 6) lab('waterborne', 0.15, `dissolved oxygen ${last} mg/L is low (< 6 mg/L)`, 'dissolved-oxygen')
     const peak = Math.max(...doS.series.slice(-3).map((p) => p.value))
-    if (peak > 0 && (peak - last) / peak > 0.25) add('waterborne', 0.1, `dissolved oxygen fell ${Math.round(((peak - last) / peak) * 100)}% in recent years (${peak} → ${last} mg/L)`, 'lab', ref('dissolved-oxygen'))
+    if (peak > 0 && (peak - last) / peak > 0.25) lab('waterborne', 0.1, `dissolved oxygen fell ${Math.round(((peak - last) / peak) * 100)}% in recent years (${peak} → ${last} mg/L)`, 'dissolved-oxygen')
   }
   const temp = L('waterTemperature')
-  if (temp?.value > 25) { add('vector', 0.2, `water temperature ${temp.value} °C`, 'lab', ref('waterTemperature')); add('algae', 0.2, `water temperature ${temp.value} °C`, 'lab', ref('waterTemperature')) }
-  else if (temp?.value > 20) add('vector', 0.1, `water temperature ${temp.value} °C`, 'lab', ref('waterTemperature'))
-  const ec = L('conductivity')?.value != null ? L('conductivity').value * 1000 : L('electrical-conductivity')?.value
-  const ecCode = L('conductivity') ? 'conductivity' : 'electrical-conductivity'
-  if (ec > 1500) add('chemical', 0.25, `conductivity ${Math.round(ec)} µS/cm > 1500 µS/cm (high salinity: seawater intrusion or urban runoff)`, 'lab', ref(ecCode))
+  if (temp?.value > 25) { lab('vector', 0.2, `water temperature ${temp.value} °C`, 'waterTemperature'); lab('algae', 0.2, `water temperature ${temp.value} °C`, 'waterTemperature') }
+  else if (temp?.value > 20) lab('vector', 0.1, `water temperature ${temp.value} °C`, 'waterTemperature')
+  const ecCode = L('conductivity') ? 'conductivity' : L('electrical-conductivity') ? 'electrical-conductivity' : null
+  if (ecCode) {
+    labCovers.chemical = true
+    const ec = ecCode === 'conductivity' ? L('conductivity').value * 1000 : L('electrical-conductivity').value
+    if (ec > 1500) lab('chemical', 0.25, `conductivity ${Math.round(ec)} µS/cm > 1500 µS/cm (high salinity: seawater intrusion or urban runoff)`, ecCode)
+  }
   for (const [code, eqs] of Object.entries(EQS_UG)) {
     const p = L(code)
     if (!p) continue
     if (p.censored) {
       if (p.detectionLimit > eqs) gaps.push(`${labs[code].display}: lab detection limit (${p.detectionLimit} µg/L) is above the EU standard (${eqs} µg/L) — results cannot rule out exceedance.`)
-    } else if (p.value > eqs) add('chemical', 0.35, `${labs[code].display} ${p.value} µg/L > EU MAC-EQS ${eqs} µg/L (Dir. 2013/39/EU)`, 'lab', ref(code))
+      else labCovers.chemical = true
+    } else {
+      labCovers.chemical = true
+      if (p.value > eqs) lab('chemical', 0.35, `${labs[code].display} ${p.value} µg/L > EU MAC-EQS ${eqs} µg/L (Dir. 2013/39/EU)`, code)
+    }
   }
+  if (quarantine.length) gaps.push(`${quarantine.length} lab value(s) are physically implausible even after correction and were excluded from scoring.`)
   const years = Object.values(labs).map((l) => l.latest.date).sort()
   const newestLab = years[years.length - 1]
   if (newestLab && new Date().getFullYear() - Number(newestLab.slice(0, 4)) >= 3) gaps.push(`Most recent lab data is from ${newestLab.slice(0, 4)} — citizen reports are the only current signal.`)
@@ -200,16 +237,24 @@ export function assessSite(site) {
   const exposure = /urban|city/i.test(`${loc?.description} ${loc?.name}`) ? 1 : 0.8
 
   const vuln = { waterborne: vulnInfect, algae: vulnInfect, vector: vulnInfect, tick: 1, chemical: vulnInfect, wellbeing: vulnWell }
+  // A pathway nothing here can detect is "insufficient", never "low": absence of data
+  // is not evidence of safety. Citizen reports cover every pathway (every question is asked).
   const pathways = Object.entries(PATHWAYS).map(([key, def]) => {
     const evidence = ev[key].sort((a, b) => b.weight - a.weight)
+    if (!cit.n && !labCovers[key]) {
+      return { key, ...def, hazard: null, exposure, vulnerability: vuln[key], score: 0, level: 'insufficient', evidence }
+    }
     const hazard = clamp(evidence.reduce((s, e) => s + e.weight, 0), 0, 1)
     const score = clamp(Math.round(100 * hazard * exposure * vuln[key]), 0, 100)
     return { key, ...def, hazard, exposure, vulnerability: vuln[key], score, level: levelOf(score), evidence }
-  }).sort((a, b) => b.score - a.score)
+  }).sort((a, b) => (a.level === 'insufficient') - (b.level === 'insufficient') || b.score - a.score)
+
+  const insufficient = pathways.filter((p) => p.level === 'insufficient')
+  if (insufficient.length) gaps.push(`No data here can detect: ${insufficient.map((p) => p.title.toLowerCase()).join(', ')}. Citizen reports would cover these.`)
 
   const top = pathways[0]
   const score = top.score
-  const level = levelOf(score)
+  const level = top.level === 'insufficient' ? 'insufficient' : levelOf(score)
   const sources = (cit.n ? 1 : 0) + (newestLab ? 1 : 0) + (healthUsed.length ? 1 : 0)
   const confidence = cit.n >= 3 && sources >= 2 ? 'high' : cit.n >= 1 || sources >= 2 ? 'medium' : 'low'
 
@@ -222,9 +267,9 @@ export function assessSite(site) {
   }
 
   return {
-    site, score, level, confidence, pathways, labs, health, citizen: { n: cit.n }, exposure,
+    site, score, level, confidence, pathways, labs, quarantine, health, citizen: { n: cit.n, submissions: cit.submissions }, exposure,
     vulnerability: { infection: vulnInfect, wellbeing: vulnWell, chronic, mental, obesity },
-    gaps, protective, actions: actionsFor(pathways, cit.n), basis: [...basis], alert: level === 'high' || pathways.filter((p) => p.level !== 'low').length >= 2,
+    gaps, protective, actions: actionsFor(pathways, cit.n), basis: [...basis], alert: level === 'high' || pathways.filter(isElevated).length >= 2,
   }
 }
 
@@ -258,7 +303,7 @@ const ACTIONS = {
 
 function actionsFor(pathways, n) {
   const out = []
-  for (const p of pathways.filter((x) => x.level !== 'low')) {
+  for (const p of pathways.filter(isElevated)) {
     for (const [audience, text] of ACTIONS[p.key]) out.push({ audience, text, pathway: p.key, level: p.level })
   }
   if (n < 3) out.push({ audience: 'Citizen science team', text: 'Launch a 7-day reporting challenge here to raise confidence (need ≥ 3 independent reports).', pathway: 'data', level: 'info' })

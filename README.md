@@ -92,7 +92,7 @@ src/
   lib/fhirServer.js    FHIR REST client (transaction, search, metadata)
   data/oah-bundle.json compiled from github.com/hl7-eu/oah with SUSHI
 scripts/build-data.mjs rebuilds the dataset from the IG
-tests/                 vitest suite (data quality, FHIR conformance, risk engine)
+tests/                 vitest suite (data quality, FHIR conformance, risk engine, input validation, sync integrity)
 ```
 
 ## Run it
@@ -100,7 +100,7 @@ tests/                 vitest suite (data quality, FHIR conformance, risk engine
 ```bash
 npm install
 npm run dev      # http://localhost:5173
-npm test         # 9 tests
+npm test         # 20 tests
 npm run build
 ```
 
@@ -116,6 +116,15 @@ OAH_IG_DIR=./oah node scripts/build-data.mjs
 - **Demo data:** the Calore (Benevento) and Akerselva (Oslo) reaches and 7 citizen reports are synthetic demo data. They are tagged `aqualink-demo` / `synthetic-demo` in FHIR and labelled "Demo" in the UI. All lab and health data is the official OAH IG example data.
 - **Photo assist:** colour heuristics, not a trained model. That's why it only suggests, shows its reasoning, and needs human confirmation. A trained model (e.g. for macroinvertebrates) can plug in behind the same interface.
 - **Risk scores:** decision support, not diagnoses. Confidence is shown, and drops when evidence is thin.
+- **Scores are not probabilities.** The FHIR `RiskAssessment` carries a qualitative level and states the heuristic score in its rationale; it never fills `probability[x]`.
+
+## Evidence safeguards
+
+- **Independent citizens, not submissions.** Only each citizen's latest report counts, so one person can't inflate a score or its confidence.
+- **No data ≠ low risk.** A pathway that nothing at a site can detect is shown as *insufficient evidence*, never as "low".
+- **Old lab data counts for less** (×0.7 after 3 years, ×0.4 after 6), and the age is shown next to the evidence.
+- **Implausible values are quarantined**, and invalid input (unknown sites or answers, out-of-range measurements, future timestamps, corrupt saved data) is rejected before it reaches the store or a FHIR bundle.
+- **Demo reports are never synced**, and every sync sends the Locations, Groups and Device its records reference.
 
 ## Scaling to every OneAquaHealth city
 

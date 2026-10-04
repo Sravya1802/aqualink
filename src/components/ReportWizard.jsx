@@ -4,9 +4,10 @@ import { SITES, addReport, getReports } from '../lib/store.js'
 import { makeReport } from '../lib/seed.js'
 import { analyzePhoto } from '../lib/photoAssist.js'
 import { assessSite } from '../lib/riskEngine.js'
-import { transactionBundle } from '../lib/fhirBuilders.js'
+import { transactionBundle, syncBundle } from '../lib/fhirBuilders.js'
 import { postTransaction, getBase } from '../lib/fhirServer.js'
 import { checkAll } from '../lib/validate.js'
+import { measurementError, isKnownSite } from '../lib/reportValidation.js'
 import { JsonModal } from './ui.jsx'
 
 function citizenId() {
@@ -21,11 +22,14 @@ const LEVELS = [[0, 'Stream Spotter', '🔍'], [3, 'Stream Guardian', '🛡️']
 
 export default function ReportWizard({ initialSite, onDone }) {
   const [step, setStep] = useState(0)
-  const [siteId, setSiteId] = useState(initialSite || SITES[3].id)
+  // Unknown site ids (e.g. a mistyped #/report/<id> link) fall back to a default site.
+  const [siteId, setSiteId] = useState(isKnownSite(initialSite) ? initialSite : SITES[3].id)
   const [answers, setAnswers] = useState({})
   const [measurements, setMeasurements] = useState({})
   const [photo, setPhoto] = useState(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const [photoError, setPhotoError] = useState(null)
+  const [submitError, setSubmitError] = useState(null)
   const [submitted, setSubmitted] = useState(null)
 
   const total = QUESTIONS.length + 2 // site/photo + questions + measurements
@@ -33,6 +37,11 @@ export default function ReportWizard({ initialSite, onDone }) {
 
   const onPhoto = async (file) => {
     if (!file) return
+    setPhotoError(null)
+    if (!file.type.startsWith('image/')) {
+      setPhotoError('That file is not an image. Please choose a photo (JPEG, PNG, HEIC…).')
+      return
+    }
     setAnalyzing(true)
     try {
       const result = await analyzePhoto(file)
@@ -43,6 +52,8 @@ export default function ReportWizard({ initialSite, onDone }) {
         for (const [qid, s] of Object.entries(result.suggestions)) if (next[qid] == null) next[qid] = s.answer
         return next
       })
+    } catch {
+      setPhotoError("We couldn't read that photo. You can try another one, or just answer the questions yourself.")
     } finally {
       setAnalyzing(false)
     }
@@ -55,10 +66,15 @@ export default function ReportWizard({ initialSite, onDone }) {
     setAnswers({ ...answers, [q.id]: next.length ? next : ['none'] })
   }
 
+  const measurementErrors = Object.fromEntries(OPTIONAL_MEASUREMENTS.map((m) => [m.id, measurementError(m.id, measurements[m.id])]).filter(([, e]) => e))
   const submit = () => {
-    const report = makeReport({ siteId, answers, measurements, photoAssist: photo, citizenId: citizenId() })
-    addReport(report)
-    setSubmitted(report)
+    try {
+      const report = makeReport({ siteId, answers, measurements, photoAssist: photo, citizenId: citizenId() })
+      addReport(report)
+      setSubmitted(report)
+    } catch (e) {
+      setSubmitError(e.message)
+    }
   }
 
   if (submitted) return <Done report={submitted} onDone={onDone} />
@@ -84,7 +100,7 @@ export default function ReportWizard({ initialSite, onDone }) {
           <div className="q-term" style={{ marginTop: 12 }}>Optional · Photo assist</div>
           <label className="drop">
             <input type="file" accept="image/*" capture="environment" hidden onChange={(e) => onPhoto(e.target.files?.[0])} />
-            {analyzing ? 'Analysing on your device…' : photo ? <img src={photo.preview} alt="Your stream photo" /> : <>📷 <b>Take or upload a photo of the stream</b><br /><span className="small">Analysed on your device — nothing is uploaded. We'll suggest answers; you confirm them.</span></>}
+            {photoError ? <span className="cross">⚠️ {photoError}</span> : analyzing ? 'Analysing on your device…' : photo ? <img src={photo.preview} alt="Your stream photo" /> : <>📷 <b>Take or upload a photo of the stream</b><br /><span className="small">Analysed on your device — nothing is uploaded. We'll suggest answers; you confirm them.</span></>}
           </label>
         </div>
       )}
@@ -124,7 +140,8 @@ export default function ReportWizard({ initialSite, onDone }) {
             <label key={m.id} style={{ display: 'block', margin: '12px 0' }}>
               <span className="small"><b>{m.label}</b> ({m.unitLabel})</span>
               <input className="input" type="number" min={m.min} max={m.max} step={m.step} value={measurements[m.id] ?? ''} placeholder="Skip if unknown"
-                onChange={(e) => setMeasurements({ ...measurements, [m.id]: e.target.value === '' ? undefined : e.target.value })} />
+                onChange={(e) => { setSubmitError(null); setMeasurements({ ...measurements, [m.id]: e.target.value === '' ? undefined : e.target.value }) }} />
+              {measurementErrors[m.id] && <span className="small cross">{measurementErrors[m.id]}</span>}
             </label>
           ))}
           <div className="why">Your answers become standards-based health data (HL7 FHIR, OneAquaHealth profile) that city health officers can use straight away.</div>
@@ -138,9 +155,10 @@ export default function ReportWizard({ initialSite, onDone }) {
             {step === 0 ? `Start at ${site.name} →` : suggestion ? 'Confirm & next →' : 'Next →'}
           </button>
         ) : (
-          <button className="btn primary" onClick={submit}>Submit report ✓</button>
+          <button className="btn primary" onClick={submit} disabled={Object.keys(measurementErrors).length > 0}>Submit report ✓</button>
         )}
       </div>
+      {submitError && <p className="small cross" style={{ textAlign: 'center', marginTop: 10 }}>{submitError}</p>}
       {q && <p className="small muted" style={{ textAlign: 'center', marginTop: 10 }}>Not sure? Pick the closest answer — several reports together make the picture reliable.</p>}
     </div>
   )
@@ -160,7 +178,7 @@ function Done({ report, onDone }) {
   const send = async () => {
     setSync({ state: 'sending' })
     try {
-      const res = await postTransaction(transactionBundle(resources))
+      const res = await postTransaction(syncBundle([report]).bundle)
       setSync({ state: 'ok', n: res.entry?.length })
     } catch (e) {
       setSync({ state: 'error', msg: e.message })

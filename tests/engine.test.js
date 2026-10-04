@@ -43,7 +43,7 @@ describe('citizen report → FHIR', () => {
   describe('risk engine', () => {
     beforeEach(() => replaceReports([]))
     it('raises a high waterborne warning from agreeing citizen reports', () => {
-      replaceReports([1, 2, 3].map(() => makeReport({ siteId: 'Loc-AquaLink-Calore', answers })))
+      replaceReports([1, 2, 3].map((i) => makeReport({ siteId: 'Loc-AquaLink-Calore', answers, citizenId: `cit-${i}` })))
       const res = assessSite(site('Loc-AquaLink-Calore'))
       expect(res.level).toBe('high')
       expect(res.alert).toBe(true)
@@ -68,6 +68,8 @@ describe('citizen report → FHIR', () => {
       const ra = buildRiskAssessment(site('Loc-Almyros'), res)
       expect(ra.resourceType).toBe('RiskAssessment')
       expect(ra.prediction).toHaveLength(6)
+      expect(ra.prediction.every((p) => p.probabilityDecimal === undefined)).toBe(true)
+      expect(ra.prediction.some((p) => /not a calibrated probability/.test(p.rationale))).toBe(true)
       expect(ra.basis.length).toBeGreaterThan(0)
     })
   })

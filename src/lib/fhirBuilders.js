@@ -2,7 +2,7 @@
 // (ObservationIndicatorsOah on a LocationOah), plus a Provenance that records the
 // human-in-the-loop AI assist, and a RiskAssessment for the One Health risk result.
 import { AQUALINK, OAH, OAH_PROFILE, UCUM, QUESTIONS, OPTIONAL_MEASUREMENTS, oahCoding, questionById } from './codes.js'
-import { get } from './store.js'
+import { get, SITES } from './store.js'
 
 const uuid = () => (globalThis.crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`)
 const citizenTag = { system: 'https://aqualink.app/tags', code: 'citizen-science', display: 'Citizen science observation' }
@@ -139,17 +139,22 @@ export function buildRiskAssessment(site, result) {
     occurrenceDateTime: new Date().toISOString(),
     performer: { reference: `Device/${APP_DEVICE.id}`, display: 'AquaLink risk engine' },
     basis: result.basis.map((ref) => ({ reference: ref })),
+    // The engine produces a heuristic 0–100 score, not a calibrated probability, so we
+    // deliberately do not populate probability[x]; the score is stated in the rationale.
     prediction: result.pathways.map((p) => ({
       outcome: {
         coding: p.health.map((h) => ({ system: OAH, code: h.code, display: h.display })),
         text: p.title,
       },
-      qualitativeRisk: { coding: [{ system: RISK_PROB, code: p.level, display: p.level }] },
-      probabilityDecimal: Math.round(p.score) / 100,
-      rationale: p.evidence.map((e) => e.text).join('; ') || 'No hazard evidence.',
+      ...(p.level === 'insufficient'
+        ? { rationale: 'Insufficient evidence: no data source at this site can detect this pathway. Not assessed.' }
+        : {
+            qualitativeRisk: { coding: [{ system: RISK_PROB, code: p.level, display: p.level }] },
+            rationale: `AquaLink heuristic score ${p.score}/100 (not a calibrated probability). Evidence: ${p.evidence.map((e) => e.text).join('; ') || 'no hazard signals'}.`,
+          }),
     })),
     mitigation: result.actions.map((a) => `[${a.audience}] ${a.text}`).join('\n'),
-    note: [{ text: `Overall score ${result.score}/100 (${result.level}). Confidence: ${result.confidence}. Scores are decision support for public-health officers, not diagnoses.` }],
+    note: [{ text: `Overall heuristic score ${result.score}/100 (${result.level}). Confidence: ${result.confidence}. Scores are explainable decision support for public-health officers — not calibrated probabilities and not diagnoses.` }],
   }
 }
 
@@ -176,6 +181,36 @@ export function populationGroup(site) {
       exclude: false,
     }],
   }
+}
+
+// Every resource the given sites' reports reference: the site Location and its parents
+// (Location.partOf chain), the population Group, and the AquaLink Device. FHIR servers
+// enforce referential integrity, so every sync path must send these alongside reports.
+export function supportingResources(siteIds) {
+  const out = new Map()
+  for (const id of new Set(siteIds)) {
+    let loc = get(`Location/${id}`)
+    while (loc && !out.has(`Location/${loc.id}`)) {
+      out.set(`Location/${loc.id}`, loc)
+      loc = loc.partOf ? get(loc.partOf.reference) : null
+    }
+    const site = SITES.find((s) => s.id === id)
+    if (site) {
+      const group = populationGroup(site)
+      out.set(`Group/${group.id}`, group)
+    }
+  }
+  out.set(`Device/${APP_DEVICE.id}`, APP_DEVICE)
+  return [...out.values()]
+}
+
+// Transaction bundle for syncing citizen reports. Synthetic demo reports are never
+// synced to a real server.
+export function syncBundle(reports, siteIds = []) {
+  const real = reports.filter((r) => !r.demo)
+  const ids = [...siteIds, ...real.map((r) => r.siteId)]
+  const resources = [...supportingResources(ids), ...real.flatMap((r) => [...r.resources.observations, r.resources.provenance])]
+  return { bundle: transactionBundle(resources), reportsSent: real.length, demoSkipped: reports.length - real.length }
 }
 
 export { questionById }

@@ -1,6 +1,6 @@
 import { useState, useSyncExternalStore } from 'react'
-import { getReports, subscribe, SITES, get, demoLocations } from '../lib/store.js'
-import { transactionBundle, populationGroup, APP_DEVICE } from '../lib/fhirBuilders.js'
+import { getReports, subscribe, SITES, demoLocations } from '../lib/store.js'
+import { syncBundle } from '../lib/fhirBuilders.js'
 import { checkAll } from '../lib/validate.js'
 import { getBase, setBase, ping, postTransaction, searchCitizenObservations, DEFAULT_BASE } from '../lib/fhirServer.js'
 import { resetDemo } from '../lib/seed.js'
@@ -34,11 +34,9 @@ export default function FhirTab() {
   }
 
   const syncAll = () => run('Sync', async () => {
-    const parents = ['Location/Loc-Benevento', 'Location/Loc-Nordre-Aker', 'Location/Almyros', 'Location/Giofyros'].map(get).filter(Boolean)
-    const sites = SITES.map((s) => get(`Location/${s.id}`))
-    const resources = [...parents, ...sites, ...SITES.map(populationGroup), APP_DEVICE, ...reports.flatMap((r) => [...r.resources.observations, r.resources.provenance])]
-    const res = await postTransaction(transactionBundle(resources), base)
-    return `${res.entry?.length ?? 0} resources stored (${observations.length} citizen Observations).`
+    const { bundle, reportsSent, demoSkipped } = syncBundle(reports, SITES.map((s) => s.id))
+    const res = await postTransaction(bundle, base)
+    return `${res.entry?.length ?? 0} resources stored: ${reportsSent} citizen report(s) plus sites, populations and device${demoSkipped ? ` (${demoSkipped} synthetic demo reports are never synced)` : ''}.`
   })
 
   const roundTrip = () => run('Round-trip search', async () => {

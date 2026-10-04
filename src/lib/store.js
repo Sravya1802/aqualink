@@ -2,6 +2,7 @@
 // reports persisted in localStorage. Everything the UI shows is derived from FHIR resources.
 import bundle from '../data/oah-bundle.json'
 import { OAH_PROFILE } from './codes.js'
+import { isValidStoredReport } from './reportValidation.js'
 
 const byType = {}
 const byRef = {}
@@ -88,8 +89,15 @@ export function airObservations(site) {
 
 // ---- Citizen reports (localStorage) ----
 const KEY = 'aqualink.reports.v1'
+
+// Parses saved reports, dropping anything malformed instead of crashing the app.
+export function parseStoredReports(text) {
+  let data
+  try { data = JSON.parse(text) } catch { return [] }
+  return Array.isArray(data) ? data.filter(isValidStoredReport) : []
+}
 function load() {
-  try { return JSON.parse(localStorage.getItem(KEY)) || [] } catch { return [] }
+  try { return parseStoredReports(localStorage.getItem(KEY)) } catch { return [] }
 }
 let reports = load()
 const listeners = new Set()

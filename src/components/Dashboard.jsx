@@ -3,7 +3,7 @@ import { MapContainer, TileLayer, CircleMarker, Tooltip } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { SITES, getReports, subscribe, reportsFor, get } from '../lib/store.js'
 import { assessSite } from '../lib/riskEngine.js'
-import { buildRiskAssessment, populationGroup, transactionBundle, APP_DEVICE } from '../lib/fhirBuilders.js'
+import { buildRiskAssessment, supportingResources, transactionBundle } from '../lib/fhirBuilders.js'
 import { questionById } from '../lib/codes.js'
 import { Gauge, Sparkline, JsonModal, LEVEL_COLOR, download, fmtDate, fmtNum } from './ui.jsx'
 
@@ -31,11 +31,11 @@ export default function Dashboard({ siteId, onSelect, onReport }) {
         <div className="site-list">
           {results.map((r) => (
             <button key={r.site.id} className={`site-item ${r.site.id === current.site.id ? 'active' : ''}`} onClick={() => onSelect(r.site.id)}>
-              <span className={`score-dot ${r.level}`}>{r.score}</span>
+              <span className={`score-dot ${r.level}`}>{r.level === 'insufficient' ? '—' : r.score}</span>
               <span className="grow">
                 <b>{r.site.name}</b>
                 <div className="small muted">{r.site.place}</div>
-                <div className="small muted">{r.pathways[0].icon} {r.pathways[0].title} · {r.citizen.n} reports</div>
+                <div className="small muted">{r.pathways[0].icon} {r.pathways[0].title} · {r.citizen.n} citizen{r.citizen.n === 1 ? '' : 's'}</div>
               </span>
               {r.alert && <span title="Early warning">🚨</span>}
             </button>
@@ -56,7 +56,7 @@ function SitePanel({ r, onReport }) {
 
   const riskResource = () => buildRiskAssessment(site, r)
   const exportBundle = () => {
-    const resources = [loc, populationGroup(site), APP_DEVICE, riskResource(), ...siteReports.flatMap((x) => [...x.resources.observations, x.resources.provenance])]
+    const resources = [...supportingResources([site.id]), riskResource(), ...siteReports.flatMap((x) => [...x.resources.observations, x.resources.provenance])]
     download(`aqualink-${site.id}-transaction.json`, transactionBundle(resources))
   }
 
@@ -78,7 +78,7 @@ function SitePanel({ r, onReport }) {
           <div className="grow">
             <div className="row wrap">
               <h2>{site.name}</h2>
-              <span className={`badge ${r.level}`}>{r.level} risk</span>
+              <span className={`badge ${r.level}`}>{r.level === 'insufficient' ? 'insufficient evidence' : `${r.level} risk`}</span>
               <span className="badge info">confidence: {r.confidence}</span>
               {site.official ? <span className="tag">OAH IG location</span> : <span className="badge demo">AquaLink demo reach</span>}
             </div>
@@ -94,7 +94,7 @@ function SitePanel({ r, onReport }) {
           </div>
         </div>
         <div className="kpis">
-          <div className="kpi"><b>{r.citizen.n}</b><span>citizen reports (30 days)</span></div>
+          <div className="kpi"><b>{r.citizen.n}</b><span>independent citizens (30 days){r.citizen.submissions > r.citizen.n ? ` · ${r.citizen.submissions} reports` : ''}</span></div>
           <div className="kpi"><b>{Object.keys(r.labs).length}</b><span>lab / sensor indicators</span></div>
           <div className="kpi"><b>{Object.keys(r.health).length}</b><span>population health measures</span></div>
           <div className="kpi"><b>{r.basis.length}</b><span>FHIR resources as evidence</span></div>
@@ -107,11 +107,13 @@ function SitePanel({ r, onReport }) {
           <div key={p.key} className={`pathway ${p.level}`}>
             <div className="row">
               <h4 className="grow"><span>{p.icon}</span>{p.title}</h4>
-              <span className={`badge ${p.level}`}>{p.score}</span>
+              <span className={`badge ${p.level}`}>{p.level === 'insufficient' ? 'no data' : p.score}</span>
             </div>
             <p className="small muted">{p.summary}</p>
             <div className="bar"><i style={{ width: `${p.score}%`, background: LEVEL_COLOR[p.level] }} /></div>
-            {p.evidence.length ? (
+            {p.level === 'insufficient' ? (
+              <p className="small muted">Not assessed: nothing at this site can detect this pathway yet. Citizen reports would — no data is not the same as low risk.</p>
+            ) : p.evidence.length ? (
               <ul className="evidence">
                 {p.evidence.slice(0, 5).map((e, i) => (
                   <li key={i}><span className={`src ${e.source}`}>{e.source}</span><span>{e.text}</span></li>

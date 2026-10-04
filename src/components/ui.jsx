@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 
-export const LEVEL_COLOR = { high: '#c2352b', moderate: '#b8730a', low: '#2c8a4b' }
+export const LEVEL_COLOR = { high: '#c2352b', moderate: '#b8730a', low: '#2c8a4b', insufficient: '#8a9a9f' }
 
 export function Gauge({ score, level }) {
   const r = 38, c = 2 * Math.PI * r
@@ -9,7 +9,7 @@ export function Gauge({ score, level }) {
       <circle cx="46" cy="46" r={r} fill="none" stroke="#eef4f5" strokeWidth="9" />
       <circle cx="46" cy="46" r={r} fill="none" stroke={LEVEL_COLOR[level]} strokeWidth="9" strokeLinecap="round"
         strokeDasharray={`${(score / 100) * c} ${c}`} transform="rotate(-90 46 46)" />
-      <text x="46" y="50" textAnchor="middle" fontSize="24" fontWeight="800" fill="#13262b">{score}</text>
+      <text x="46" y="50" textAnchor="middle" fontSize="24" fontWeight="800" fill="#13262b">{level === 'insufficient' ? '—' : score}</text>
       <text x="46" y="65" textAnchor="middle" fontSize="9" fill="#5b7076">/ 100</text>
     </svg>
   )

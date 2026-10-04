@@ -2,6 +2,7 @@
 // `synthetic-demo` in FHIR and labelled "Demo" in the UI; real reports replace them.
 import { buildReportResources } from './fhirBuilders.js'
 import { getReports, replaceReports } from './store.js'
+import { validateReportInput } from './reportValidation.js'
 
 const ago = (hours) => new Date(Date.now() - hours * 3600e3).toISOString()
 
@@ -16,6 +17,10 @@ const DEMO = [
 ]
 
 export function makeReport({ siteId, answers, measurements, photoAssist, demo = false, createdAt = new Date().toISOString(), citizenId }) {
+  // Drop blank optional measurements, then reject anything invalid before it can be stored.
+  measurements = Object.fromEntries(Object.entries(measurements || {}).filter(([, v]) => v != null && v !== ''))
+  const errors = validateReportInput({ siteId, answers, measurements, createdAt })
+  if (errors.length) throw new Error(`Invalid report: ${errors.join(' ')}`)
   const report = {
     id: globalThis.crypto?.randomUUID?.() || String(Date.now()),
     siteId,
