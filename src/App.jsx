@@ -38,7 +38,7 @@ export default function App() {
     <>
       <header className="topbar">
         <a className="brand" href="#/dashboard">
-          <img src="/favicon.svg" alt="" />
+          <img src={`${import.meta.env.BASE_URL}favicon.svg`} alt="" />
           <span><b>AquaLink</b><small>From streams to systems · One Health</small></span>
         </a>
         <nav className="tabs">
