@@ -2,6 +2,8 @@
 
 **Citizens already notice when a stream is sick. AquaLink turns those observations into OneAquaHealth FHIR data and One Health early warnings, so a public-health officer can act before people get sick.**
 
+**🔗 Live demo: https://sravya1802.github.io/aqualink/**
+
 Built for the **OneAquaHealth IEEE Global Hackathon 2026** · Primary track: **Track 7: Digital Health Standards** (also covers Tracks 1, 2, 3, 5 and 6)
 
 ![Officer dashboard](docs/dashboard.png)
