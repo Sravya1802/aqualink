@@ -4,6 +4,8 @@
 
 **🔗 Live demo: https://sravya1802.github.io/aqualink/**
 
+**🎬 Demo video: https://drive.google.com/file/d/15lK8_COXaLhvhErEp0olAalfmR4JzDxt/view?usp=share_link**
+
 Built for the **OneAquaHealth IEEE Global Hackathon 2026** · Primary track: **Track 7: Digital Health Standards** (also covers Tracks 1, 2, 3, 5 and 6)
 
 ![Officer dashboard](docs/dashboard.png)
